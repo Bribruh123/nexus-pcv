@@ -10,8 +10,20 @@ RN_PREFIX_CLASSNAME_MAPPINGS: dict[str, dict[str, Any]] = {
     "userext": {
         "class": "aaaUserEp",
     },
+    "pkiext": {
+        "class": "pkiEp",
+    },
     "fabric": {
         "class": "fabricInst",
+    },
+    "comm": {
+        "class": "commPol",
+        "keys": [
+            {
+                "attribute": "name",
+                "regex": ".*",
+            }
+        ],
     },
     "hsPols": {
         "class": "healthPolCont",
