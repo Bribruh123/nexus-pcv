@@ -15,6 +15,47 @@ from .ndi import NDI
 logger = logging.getLogger(__name__)
 
 
+def _last_rn_of_dn(dn: str) -> str:
+    """Extract the last RN component from an ACI DN, respecting bracket nesting."""
+    depth = 0
+    for i in range(len(dn) - 1, -1, -1):
+        c = dn[i]
+        if c == "]":
+            depth += 1
+        elif c == "[":
+            depth -= 1
+        elif c == "/" and depth == 0:
+            return dn[i + 1 :]
+    return dn
+
+
+# Classes that do not exist in NDI's APIC 6.0 schema and must be excluded.
+_NDI_EXCLUDED_CLASSES = {"infraCont"}
+
+
+def _filter_classes(obj: ApicObject, exclude: set[str]) -> None:
+    """Remove children (and their subtrees) whose class is in `exclude`."""
+    obj.children[:] = [c for c in obj.children if c.cl not in exclude]
+    for child in obj.children:
+        _filter_classes(child, exclude)
+
+
+def _inject_tdn(obj: ApicObject) -> None:
+    """Add missing tDn to objects whose RN key is a bare topology/ path (no inner brackets).
+
+    NDI requires tDn for RN validation.  Without it NDI parses the dn itself and
+    re-encodes the extracted key, causing an off-by-one bracket mismatch.
+    """
+    dn = obj.attributes.get("dn", "")
+    if dn and "tDn" not in obj.attributes:
+        last_rn = _last_rn_of_dn(dn)
+        m = re.search(r"^\w+-\[(topology/[^\[\]]+)\]$", last_rn)
+        if m:
+            obj.attributes["tDn"] = m.group(1)
+    for child in obj.children:
+        _inject_tdn(child)
+
+
 class PCV:
     def __init__(
         self,
@@ -86,7 +127,7 @@ class PCV:
 
     def _check_classes(self, root: ApicObject) -> None:
         """Helper function to verify if all objects have classnames"""
-        if root.cl is None:
+        if root.cl is None and not root.is_placeholder:
             error_msg = "Missing classname for '{}'".format(root["dn"])
             logger.error(error_msg)
             raise ValueError(error_msg)
@@ -143,12 +184,12 @@ class PCV:
                     if "delete" in action:
                         classname = change["change"].get("before", {}).get("class_name")
                         attributes = {}
-                        attributes = change["change"].get("before", {}).get("content")
+                        attributes = change["change"].get("before", {}).get("content") or {}
                         attributes["status"] = "deleted"
                         attributes["dn"] = change["change"].get("before", {}).get("dn")
                     else:
                         classname = change["change"].get("after", {}).get("class_name")
-                        attributes = change["change"].get("after", {}).get("content")
+                        attributes = change["change"].get("after", {}).get("content") or {}
                         attributes["dn"] = change["change"].get("after", {}).get("dn")
                     attributes = {
                         k: v
@@ -183,8 +224,11 @@ class PCV:
         if not len(self.root.children):
             logger.info("No updates planned. No need to trigger a pre-change analysis.")
             return None, None, None
-        logger.debug(f"Proposed change (JSON): {self.root[0]}")
-        err, job_id = self.ndi.start_pcv(name, group, site, str(self.root[0]))
+        _inject_tdn(self.root[0])
+        _filter_classes(self.root[0], _NDI_EXCLUDED_CLASSES)
+        json_data = str(self.root[0])
+        logger.debug(f"Proposed change (NDI payload): {json_data}")
+        err, job_id = self.ndi.start_pcv(name, group, site, json_data)
         if err is not None:
             return err, None, None
         err, epoch_job_id = self.ndi.wait_pcv(group, site, str(job_id))

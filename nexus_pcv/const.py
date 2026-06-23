@@ -10,11 +10,50 @@ RN_PREFIX_CLASSNAME_MAPPINGS: dict[str, dict[str, Any]] = {
     "userext": {
         "class": "aaaUserEp",
     },
+    "tacacsext": {
+        "class": "tacacsEp",
+    },
     "pkiext": {
         "class": "pkiEp",
     },
     "fabric": {
         "class": "fabricInst",
+    },
+    "bgpInstP": {
+        "class": "bgpInstPol",
+        "keys": [
+            {
+                "attribute": "name",
+                "regex": ".*",
+            }
+        ],
+    },
+    "rr": {
+        "class": "bgpRRP",
+    },
+    "mgmtp": {
+        "class": "mgmtMgmtP",
+        "keys": [
+            {
+                "attribute": "name",
+                "regex": ".*",
+            }
+        ],
+    },
+    "vmmp": {
+        "class": "vmmProvP",
+        "keys": [
+            {
+                "attribute": "name",
+                "regex": ".*",
+            }
+        ],
+    },
+    "controller": {
+        "class": "infraCont",
+    },
+    "nodeidentpol": {
+        "class": "fabricNodeIdentPol",
     },
     "comm": {
         "class": "commPol",
@@ -30,6 +69,9 @@ RN_PREFIX_CLASSNAME_MAPPINGS: dict[str, dict[str, Any]] = {
     },
     "infra": {
         "class": "infraInfra",
+    },
+    "funcprof": {          # <-- add this
+        "class": "infraFuncP",
     },
     "tn": {
         "class": "fvTenant",

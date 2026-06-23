@@ -19,6 +19,7 @@ class ApicObject:
         self.attributes = attributes
         self.children = children
         self.parent = parent
+        self.is_placeholder: bool = False
 
     def update(
         self,
@@ -107,6 +108,7 @@ class ApicObject:
                     obj.parent = o[0]
                 else:
                     new_obj = ApicObject(None, {"dn": parent_dn}, [obj], None)
+                    new_obj.is_placeholder = True
                     obj.parent = new_obj
                     self.insert(new_obj)
 
