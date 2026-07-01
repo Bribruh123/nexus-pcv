@@ -170,6 +170,8 @@ class NDI:
             logger.error(f"Get PCV results failed: {resp.json()}")
             return resp, None
 
+        logger.debug(f"PCV results response: {resp.text}")
+
         event_list = []
         try:
             for event in json.loads(resp.content)["entries"]:
@@ -196,13 +198,13 @@ class NDI:
             )
         return None, event_list
 
-    def get_pcv_url(self) -> tuple[httpx.Response | None, str | None]:
+    def get_pcv_url(self, site: str, job_id: str) -> tuple[httpx.Response | None, str | None]:
         """Get URL pointing to pre-change validation results"""
         if not self.authenticated:
             err = self._login()
             if err is not None:
                 return err, None
 
-        url = f"https://{self.hostname_ip}/appcenter/cisco/nexus-insights/ui/#/changeManagement/preChangeAnalysis"
+        url = f"https://{self.hostname_ip}/analysis-hub/pre-change-analysis/view/{site}/{job_id}"
 
         return None, url

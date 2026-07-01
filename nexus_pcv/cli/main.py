@@ -80,7 +80,7 @@ def main(
             pcv.load_tf_plan(str(nac_tf_plan))
 
         # Run the pre-change validation
-        pcv.ndi_pcv(
+        err, events, url = pcv.ndi_pcv(
             name,
             group,
             site,
@@ -89,6 +89,12 @@ def main(
             str(output_url) if output_url else "",
         )
 
+        if err is not None:
+            logger.error(f"Pre-change validation failed: {err.status_code} {err.text}")
+            raise typer.Exit(code=1)
+
+    except SystemExit:
+        raise
     except Exception as e:
         logger.error(f"Error during execution: {e}")
         raise typer.Exit(code=1) from e

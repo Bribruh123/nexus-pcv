@@ -239,11 +239,11 @@ class PCV:
         )
         if err is not None:
             return err, None, None
-        err, url = self.ndi.get_pcv_url()
+        err, url = self.ndi.get_pcv_url(site, str(job_id))
         if err is not None:
             return err, None, None
-        if file_summary and events:
-            self._write_pcv_events(events, file_summary)
+        if file_summary:
+            self._write_pcv_events(events if events else [], file_summary)
         if file_url and url is not None:
             self._write_pcv_url(url, file_url)
         return None, events, url
