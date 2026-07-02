@@ -231,12 +231,10 @@ class PCV:
         err, job_id = self.ndi.start_pcv(name, group, site, json_data)
         if err is not None:
             return err, None, None
-        err, epoch_job_id = self.ndi.wait_pcv(group, site, str(job_id))
+        err, job_details = self.ndi.wait_pcv(str(job_id))
         if err is not None:
             return err, None, None
-        err, events = self.ndi.get_pcv_results(
-            group, site, str(epoch_job_id), suppress_events
-        )
+        err, events = self.ndi.get_pcv_results(site, job_details, suppress_events)
         if err is not None:
             return err, None, None
         err, url = self.ndi.get_pcv_url(site, str(job_id))
