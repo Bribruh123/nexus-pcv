@@ -19,6 +19,15 @@ RN_PREFIX_CLASSNAME_MAPPINGS: dict[str, dict[str, Any]] = {
     "infra": {
         "class": "infraInfra",
     },
+    "mgmtp": {
+        "class": "mgmtMgmtP",
+        "keys": [
+            {
+                "attribute": "name",
+                "regex": ".*",
+            }
+        ],
+    },
     "tn": {
         "class": "fvTenant",
         "keys": [

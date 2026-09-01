@@ -35,6 +35,10 @@ def configure_logging(level: str) -> None:
     handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(lev)
+    # Keep the noisy HTTP client logs out unless explicitly debugging
+    if lev > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def version_callback(value: bool) -> None:

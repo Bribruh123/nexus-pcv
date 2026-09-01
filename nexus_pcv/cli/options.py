@@ -123,7 +123,7 @@ output_url = typer.Option(
 )
 
 verbosity = typer.Option(
-    "WARNING",
+    "INFO",
     "-v",
     "--verbosity",
     help="Either CRITICAL, ERROR, WARNING, INFO or DEBUG.",

@@ -1,3 +1,13 @@
+# 0.3.0
+
+- Add support for Nexus Dashboard (ND) 4.2.1+ using the unified Analyze API for pre-change validation
+- Authenticate via `/api/v1/infra/login` and send the JWT as a bearer token (required for write operations)
+- Resolve the target DN (`tDn`) for relation objects with a bracketed DN target, required by ND schema validation
+- Report new pre-change anomalies grouped by severity
+- Report anomalies raised and cleared by the change with per-anomaly details (type, severity, description, nodes, mnemonic)
+- Show progress by default (verbosity `INFO`) while suppressing HTTP client noise
+- Add a static class name mapping for the `mgmtp` (management profile) RN prefix
+
 # 0.2.1
 
 - Fix issue with Terraform resource attributes set to `null`

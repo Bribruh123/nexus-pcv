@@ -12,6 +12,35 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+def _build_event_entry(anomaly: dict[str, Any], change: str) -> dict[str, Any] | None:
+    """Build a report entry from a raw anomaly object.
+
+    'change' is 'raised' for anomalies new after the change or 'cleared' for
+    anomalies cleared by the change.
+    """
+    try:
+        return {
+            "AnomalyId": anomaly.get("anomalyId", ""),
+            "Change": change,
+            "Category": str(anomaly.get("category", "")).title(),
+            "Severity": str(anomaly.get("severity", "")).lower(),
+            "AnomalyType": anomaly.get("anomalyType", ""),
+            "AnomalySource": anomaly.get("anomalySource", ""),
+            "Description": anomaly.get("anomalyReason", ""),
+            "Title": anomaly.get("anomalyString", ""),
+            "MnemonicTitle": anomaly.get("mnemonicTitle", ""),
+            "MnemonicDescription": anomaly.get("mnemonicDescription", ""),
+            "ResourceType": anomaly.get("resourceType", ""),
+            "NodeNames": anomaly.get("nodeNames") or [],
+            "StartDate": anomaly.get("startDate", ""),
+            "EndDate": anomaly.get("endDate", ""),
+            "FabricName": anomaly.get("fabricName", ""),
+        }
+    except (AttributeError, TypeError):
+        return None
+
+
+
 class NDI:
     def __init__(
         self,
@@ -22,17 +51,15 @@ class NDI:
         timeout: int,
     ):
         self.hostname_ip = hostname_ip
-        self.api_url = (
-            f"https://{hostname_ip}/sedgeapi/v1/cisco-nir/api/api/telemetry/v2"
-        )
+        # ND 4.2.1+ serves Insights (NDI) through the unified Analyze API
+        self.api_url = f"https://{hostname_ip}/api/v1/analyze"
         self.username = username
         self.password = password
         self.domain = domain
         self.timeout = timeout
-        self.session = httpx.Client(verify=False)  # nosec B501
+        self.session = httpx.Client(verify=False, timeout=120.0)  # nosec B501
         # SSL verification disabled in Client() constructor
         self.authenticated = False
-        self.site_uuid = ""
 
     def _login(self) -> httpx.Response | None:
         """Helper function to authenticate and populate headers"""
@@ -41,41 +68,52 @@ class NDI:
             "userPasswd": self.password,
             "domain": self.domain,
         }
-        url = f"https://{self.hostname_ip}/login"
-        resp = self.session.post(url, json=auth_payload)
-        if resp.status_code != 200:
-            logger.error(f"Login failed: {resp.json()}")
+        # ND 4.2.1+ serves login under /api/v1/infra; older releases use /login.
+        resp = None
+        for path in ("/api/v1/infra/login", "/login"):
+            resp = self.session.post(
+                f"https://{self.hostname_ip}{path}", json=auth_payload
+            )
+            if resp.status_code == 200:
+                break
+        if resp is None or resp.status_code != 200:
+            logger.error(f"Login failed: {resp.json() if resp is not None else ''}")
             return resp
+        # Nexus Dashboard only accepts the auth cookie for reads; write requests
+        # require the JWT as a bearer token header.
+        try:
+            body = resp.json()
+            token = body.get("jwttoken") or body.get("token")
+        except Exception:
+            token = None
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
         self.authenticated = True
         return None
 
-    def get_last_epoch_id(
-        self, name: str, site: str
+    def get_base_snapshot_id(
+        self, site: str
     ) -> tuple[httpx.Response | None, str | None]:
-        """Get last epoch ID of assurance group"""
+        """Get the latest fabric snapshot ID used as the pre-change base"""
         if not self.authenticated:
             err = self._login()
             if err is not None:
                 return err, None
 
-        url = f"{self.api_url}/events/insightsGroup/{name}/fabric/{site}/epochs?$size=1&$status=FINISHED&$epochType=ONLINE"
-        resp = self.session.get(url)
+        url = f"{self.api_url}/fabricSnapshots/latest"
+        resp = self.session.get(url, params={"fabricName": site})
         if resp.status_code != 200:
-            logger.error(f"Get epoch id failed: {resp.json()}")
+            logger.error(f"Get base snapshot failed: {resp.json()}")
             return resp, None
 
-        try:
-            epochs = json.loads(resp.content)["value"]["data"]
-            epoch_id = epochs[0]["epochId"]
-            self.site_uuid = epochs[0]["fabricId"]
-            return None, epoch_id
-        except KeyError:
-            pass
-        logger.error(f"Epoch ID could not be found: {resp.json()}")
+        snapshot_id = resp.json().get("snapshotId")
+        if snapshot_id:
+            return None, snapshot_id
+        logger.error(f"Base snapshot ID could not be found: {resp.json()}")
         return resp, None
 
     def start_pcv(
-        self, name: str, group: str, site: str, json_data: str
+        self, name: str, site: str, json_data: str
     ) -> tuple[httpx.Response | None, str | None]:
         """Start pre-change validation and return job ID"""
         if not self.authenticated:
@@ -83,42 +121,50 @@ class NDI:
             if err is not None:
                 return err, None
 
-        err, epoch_id = self.get_last_epoch_id(group, site)
+        err, base_snapshot_id = self.get_base_snapshot_id(site)
         if err is not None:
             return err, None
 
-        payload = {}
-        payload["name"] = name
-        payload["fabricUuid"] = self.site_uuid
-        payload["baseEpochId"] = str(epoch_id)
-        payload["allowUnsupportedObjectModification"] = "true"
-        payload["uploadedFileName"] = "tmp.json"
-        payload["assuranceEntityName"] = site
+        data = {
+            "name": name,
+            "fabricName": site,
+            "baseSnapshotId": base_snapshot_id,
+            "allowUnsupportedObjectModification": True,
+            "uploadedFileName": "tmp.json",
+        }
+        # 'data' must be a stringified JSON form field, 'file' the proposed change
+        form = {
+            "data": json.dumps(data),
+            "qqfilename": "tmp.json",
+            "qqtotalfilesize": str(len(json_data)),
+        }
+        files = {"file": ("tmp.json", json_data, "application/json")}
 
-        files = [
-            ("data", ("blob", json.dumps(payload), "application/json")),
-            ("file", ("tmp.json", json_data, "application/json")),
-        ]
-
-        url = f"{self.api_url}/config/insightsGroup/{group}/fabric/{site}/prechangeAnalysis/fileChanges"
-        resp = self.session.post(url, files=files)
+        url = f"{self.api_url}/jobs/prechangeAnalysis/file"
+        resp = self.session.post(
+            url, params={"fabricName": site}, data=form, files=files
+        )
         if resp.status_code != 200:
             logger.error(f"Start pre-change analysis failed: {resp.json()}")
             return resp, None
 
         try:
-            job_id = json.loads(resp.content)["value"]["data"]["jobId"]
+            job_id = json.loads(resp.content)["data"]["jobId"]
             logger.info(f"Pre-change analysis started. Job ID: {job_id}")
             return None, job_id
-        except KeyError:
+        except (KeyError, TypeError):
             pass
         logger.error(f"Job ID could not be found: {resp.json()}")
         return resp, None
 
     def wait_pcv(
-        self, group: str, site: str, job_id: str
-    ) -> tuple[httpx.Response | None, str | None]:
-        """Wair for pre-change validation to complete and return epoch job ID"""
+        self, job_id: str
+    ) -> tuple[httpx.Response | None, dict[str, str] | None]:
+        """Wait for pre-change validation to complete and return job details.
+
+        Returns a dict with the timestamps needed to query anomalies:
+        {"baseSnapshotCollectionDate": ..., "analysisTime": ..., "analysisStatus": ...}
+        """
         if not self.authenticated:
             err = self._login()
             if err is not None:
@@ -127,82 +173,113 @@ class NDI:
         status = None
         start_time = datetime.now()
         while True:
-            url = f"{self.api_url}/config/insightsGroup/{group}/fabric/{site}/prechangeAnalysis/{job_id}"
+            url = f"{self.api_url}/jobs/prechangeAnalysis/{job_id}"
             resp = self.session.get(url)
             if resp.status_code != 200:
                 logger.error(f"Get pre-change analysis status failed: {resp.json()}")
                 return resp, None
-            try:
-                status = json.loads(resp.content)["value"]["data"]["analysisStatus"]
-                if status == "COMPLETED":
-                    break
-            except KeyError:
-                logger.error(f"Status could not be found: {resp.json()}")
+            data = json.loads(resp.content)
+            data = data.get("data", data)
+            status = str(data.get("analysisStatus") or "")
+            if status.lower() in ("failed", "stopped"):
+                error_msg = data.get("errorMessage") or status
+                logger.error(f"Pre-change analysis {status}: {error_msg}")
+                return resp, None
+            # Results are only available once the analysis reaches 'completed'
+            if status.lower() == "completed":
+                break
             delta_minutes = (datetime.now() - start_time).total_seconds() / 60
             if delta_minutes > self.timeout:
                 break
             logger.info("Waiting for pre-change analysis to complete ...")
             time.sleep(10)
 
-        try:
-            epoch_job_id = json.loads(resp.content)["value"]["data"]["epochDeltaJobId"]
-            logger.info(f"Pre-change analysis completed. Epoch job ID: {epoch_job_id}")
-            return None, epoch_job_id
-        except KeyError:
-            pass
-        logger.error(f"Epoch job ID could not be found: {resp.json()}")
-        return resp, None
+        data = json.loads(resp.content)
+        data = data.get("data", data)
+        logger.info("Pre-change analysis completed.")
+        return None, {
+            "baseSnapshotCollectionDate": data.get("baseSnapshotCollectionDate", ""),
+            "analysisTime": data.get("analysisTime", ""),
+            "analysisStatus": status,
+        }
 
     def get_pcv_results(
-        self, group: str, site: str, epoch_job_id: str, suppress_events: str
+        self, site: str, job_details: dict[str, str], suppress_events: str
     ) -> tuple[httpx.Response | None, list[Any] | None]:
-        """Retrieve pre-change validation results"""
+        """Retrieve anomalies raised and cleared by the pre-change validation.
+
+        Makes two calls to the anomalies endpoint:
+        - 'raisedAfterStartDate': anomalies new since the baseline ('raised')
+        - 'clearedBeforeEndDate': anomalies cleared by the change ('cleared')
+        """
         if not self.authenticated:
             err = self._login()
             if err is not None:
                 return err, None
 
-        suppress_events_list = suppress_events.split(",")
+        suppress_events_list = [
+            s.strip() for s in suppress_events.split(",") if s.strip()
+        ]
 
-        url = f"{self.api_url}/epochDelta/insightsGroup/{group}/fabric/{site}/job/{epoch_job_id}/health/view/aggregateTable?epochStatus=EPOCH2_ONLY"
-        resp = self.session.get(url)
-        if resp.status_code != 200:
-            logger.error(f"Get PCV results failed: {resp.json()}")
-            return resp, None
+        base_params = {
+            "fabricName": site,
+            "startDate": job_details.get("baseSnapshotCollectionDate", ""),
+            "endDate": job_details.get("analysisTime", ""),
+            "analysisDate": job_details.get("analysisTime", ""),
+            "preChangeAnalysis": "true",
+            "includeSystemAnomalies": "false",
+            "sort": "severity:desc",
+        }
+        url = f"{self.api_url}/anomalies/details"
 
         event_list = []
-        try:
-            for event in json.loads(resp.content)["entries"]:
-                if int(event["count"]) > 0:
-                    if (
-                        str(event.get("severity")) == "info"
-                        or str(event.get("mnemonicTitle")) in suppress_events_list
-                    ):
-                        continue
-                    event_list.append(
-                        {
-                            "Category": event.get("category").title(),
-                            "Count": event.get("count"),
-                            "Description": event.get("anomalyStr"),
-                            "Severity": event.get("severity"),
-                        }
-                    )
-        except KeyError:
-            logger.error(f"Could not find events: {resp.json()}")
-            return resp, None
+        for change, param in (
+            ("raised", "raisedAfterStartDate"),
+            ("cleared", "clearedBeforeEndDate"),
+        ):
+            resp = self.session.get(
+                url, params={**base_params, "anomalySetParam": param}
+            )
+            if resp.status_code != 200:
+                logger.error(f"Get PCV {change} anomalies failed: {resp.json()}")
+                return resp, None
+            logger.debug(f"PCV {change} anomalies response: {resp.text}")
+            try:
+                anomalies = json.loads(resp.content).get("anomalies", [])
+            except ValueError:
+                logger.error(f"Could not parse {change} anomalies: {resp.json()}")
+                return resp, None
+            for anomaly in anomalies:
+                entry = _build_event_entry(anomaly, change)
+                if (
+                    entry
+                    and entry["Severity"] != "info"
+                    and entry["AnomalyType"] not in suppress_events_list
+                ):
+                    event_list.append(entry)
+
+        severity_order = {"critical": 0, "major": 1, "warning": 2, "minor": 3, "info": 4}
+        event_list.sort(key=lambda e: severity_order.get(e["Severity"], 5))
+
         if event_list:
             logger.error(
-                f"The following anomalies have been raised:\n{yaml.dump(event_list)}"
+                "The following anomalies have been raised or cleared by the "
+                f"change:\n{yaml.dump(event_list)}"
             )
         return None, event_list
 
-    def get_pcv_url(self) -> tuple[httpx.Response | None, str | None]:
+    def get_pcv_url(
+        self, site: str, job_id: str
+    ) -> tuple[httpx.Response | None, str | None]:
         """Get URL pointing to pre-change validation results"""
         if not self.authenticated:
             err = self._login()
             if err is not None:
                 return err, None
 
-        url = f"https://{self.hostname_ip}/appcenter/cisco/nexus-insights/ui/#/changeManagement/preChangeAnalysis"
+        url = (
+            f"https://{self.hostname_ip}/analysis-hub/pre-change-analysis/view/"
+            f"{site}/{job_id}"
+        )
 
         return None, url

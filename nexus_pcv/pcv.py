@@ -84,6 +84,21 @@ class PCV:
         for child in root.children:
             self._resolve_static_classnames(child)
 
+    def _resolve_target_dns(self, root: ApicObject) -> None:
+        """Set the target DN key attribute for relation objects with a bracketed
+        DN target, which NDI schema validation requires (e.g. l3extRsNodeL3OutAtt)"""
+        if root.cl is not None and "Rs" in root.cl and "tDn" not in root.attributes:
+            dn = str(root["dn"]) if root["dn"] is not None else ""
+            index = root._index_of_last_dn_delimiter(dn)
+            rn = dn[index + 1 :] if index != -1 else dn
+            bracket = rn.find("-[")
+            if bracket != -1 and rn.endswith("]"):
+                inner = rn[bracket + 2 : -1]
+                if "/" in inner:
+                    root.attributes["tDn"] = inner
+        for child in root.children:
+            self._resolve_target_dns(child)
+
     def _check_classes(self, root: ApicObject) -> None:
         """Helper function to verify if all objects have classnames"""
         if root.cl is None:
@@ -123,6 +138,7 @@ class PCV:
                 logger.error(f"Failed to load JSON file: {filename}")
                 raise RuntimeError(f"Failed to load JSON file '{filename}': {e}") from e
         self._resolve_static_classnames(self.root)
+        self._resolve_target_dns(self.root)
         self._check_classes(self.root)
 
     def load_tf_plan(self, filename: str) -> None:
@@ -160,11 +176,12 @@ class PCV:
 
         self._resolve_static_classnames(self.root)
         self._resolve_tf_classnames(self.root, tf_plan)
+        self._resolve_target_dns(self.root)
         self._check_classes(self.root)
 
     def _write_pcv_events(self, events: list[Any], file: str) -> None:
         with open(file, "w") as fh:
-            fh.write(yaml.dump(events, default_flow_style=False))
+            fh.write(yaml.dump(events, default_flow_style=False) if events else "None\n")
 
     def _write_pcv_url(self, url: str, file: str) -> None:
         with open(file, "w") as fh:
@@ -184,22 +201,20 @@ class PCV:
             logger.info("No updates planned. No need to trigger a pre-change analysis.")
             return None, None, None
         logger.debug(f"Proposed change (JSON): {self.root[0]}")
-        err, job_id = self.ndi.start_pcv(name, group, site, str(self.root[0]))
+        err, job_id = self.ndi.start_pcv(name, site, str(self.root[0]))
         if err is not None:
             return err, None, None
-        err, epoch_job_id = self.ndi.wait_pcv(group, site, str(job_id))
+        err, job_details = self.ndi.wait_pcv(str(job_id))
+        if err is not None or job_details is None:
+            return err, None, None
+        err, events = self.ndi.get_pcv_results(site, job_details, suppress_events)
         if err is not None:
             return err, None, None
-        err, events = self.ndi.get_pcv_results(
-            group, site, str(epoch_job_id), suppress_events
-        )
+        err, url = self.ndi.get_pcv_url(site, str(job_id))
         if err is not None:
             return err, None, None
-        err, url = self.ndi.get_pcv_url()
-        if err is not None:
-            return err, None, None
-        if file_summary and events:
-            self._write_pcv_events(events, file_summary)
+        if file_summary:
+            self._write_pcv_events(events or [], file_summary)
         if file_url and url is not None:
             self._write_pcv_url(url, file_url)
         return None, events, url
